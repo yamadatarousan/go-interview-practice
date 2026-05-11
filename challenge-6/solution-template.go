@@ -2,7 +2,8 @@
 package challenge6
 
 import (
-	// Add any necessary imports here
+	"regexp"
+	"strings"
 )
 
 // CountWordFrequency takes a string containing multiple words and returns
@@ -18,5 +19,20 @@ import (
 // Output: map[string]int{"the": 2, "quick": 1, "brown": 1, "fox": 1, "jumps": 1, "over": 1, "lazy": 1, "dog": 1}
 func CountWordFrequency(text string) map[string]int {
 	// Your implementation here
-	return nil
-} 
+	// 1) アポストロフィを削除（Let's → Lets）
+	text = strings.ReplaceAll(text, "'", "")
+	text = strings.ReplaceAll(text, "’", "") // 全角っぽいのも一応
+
+	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
+	cleaned := re.ReplaceAllString(text, " ")
+
+	words := strings.Fields(cleaned)
+
+	freq := make(map[string]int)
+	for _, w := range words {
+		lower := strings.ToLower(w)
+		freq[lower]++
+	}
+
+	return freq
+}
