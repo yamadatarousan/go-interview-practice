@@ -111,7 +111,7 @@ func (r *inMemoryBookRepo) Delete(id string) error {
 func (r *inMemoryBookRepo) SearchByAuthor(author string) ([]*Book, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	author = strings.ToLower(author)
+	author = strings.TrimSpace(strings.ToLower(author))
 	var res []*Book
 	for _, b := range r.books {
 		if strings.Contains(strings.ToLower(b.Author), author) {
@@ -124,7 +124,7 @@ func (r *inMemoryBookRepo) SearchByAuthor(author string) ([]*Book, error) {
 func (r *inMemoryBookRepo) SearchByTitle(title string) ([]*Book, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	title = strings.ToLower(title)
+	title = strings.TrimSpace(strings.ToLower(title))
 	var res []*Book
 	for _, b := range r.books {
 		if strings.Contains(strings.ToLower(b.Title), title) {
@@ -195,42 +195,6 @@ type BookHandler struct {
 // NewBookHandler creates a new book handler
 func NewBookHandler(service BookService) *BookHandler {
 	return &BookHandler{Service: service}
-}
-
-func (h *BookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	switch {
-	case r.URL.Path == "/api/books" && r.Method == http.MethodGet:
-		h.handleGetAll(w, r)
-	case r.URL.Path == "/api/books" && r.Method == http.MethodPost:
-		h.handleCreate(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/books/search") && r.Method == http.MethodGet:
-		h.handleSearch(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/books/"):
-		id := strings.TrimPrefix(r.URL.Path, "/api/books/")
-		switch r.Method {
-		case http.MethodGet:
-			h.handleGetByID(w, r, id)
-		case http.MethodPut:
-			h.handleUpdate(w, r, id)
-		case http.MethodDelete:
-			h.handleDelete(w, r, id)
-		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		}
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (h *BookHandler) handleGetAll(w http.ResponseWriter, r *http.Request) {
-	books, err := h.Service.GetAllBooks()
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err)
-		return
-	}
-	respondJSON(w, http.StatusOK, books)
 }
 
 func (h *BookHandler) handleGetByID(w http.ResponseWriter, r *http.Request, id string) {
@@ -309,6 +273,7 @@ func (h *BookHandler) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func respondJSON(w http.ResponseWriter, code int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -319,9 +284,88 @@ func respondError(w http.ResponseWriter, code int, err error) {
 
 func (h *BookHandler) HandleBooks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	// 1) /api/books/search?author=... or?title=...
+	if strings.HasPrefix(r.URL.Path, "/api/books/search") {
+		if r.Method != http.MethodGet {
+			respondError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		author := r.URL.Query().Get("author")
+		title := r.URL.Query().Get("title")
+		var books []*Book
+		var err error
+		if author != "" {
+			books, err = h.Service.SearchBooksByAuthor(author)
+		} else if title != "" {
+			books, err = h.Service.SearchBooksByTitle(title)
+		} else {
+			respondError(w, http.StatusBadRequest, errors.New("author or title required"))
+			return
+		}
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, books)
+		return
+	}
+
+	// 2) /api/books/{id}
+	if strings.HasPrefix(r.URL.Path, "/api/books/") {
+		id := strings.TrimPrefix(r.URL.Path, "/api/books/")
+		id = strings.Split(id, "/")[0] // 余計な / を除去
+		if id == "" {
+			respondError(w, http.StatusNotFound, errors.New("book not found"))
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			b, err := h.Service.GetBookByID(id)
+			if err != nil {
+				respondError(w, http.StatusNotFound, errors.New("book not found"))
+				return
+			}
+			respondJSON(w, http.StatusOK, b)
+			return
+		case http.MethodPut:
+			var b Book
+			if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+				respondError(w, http.StatusBadRequest, errors.New("invalid json"))
+				return
+			}
+			if err := validateBook(&b); err != nil {
+				respondError(w, http.StatusBadRequest, err)
+				return
+			}
+			if err := h.Service.UpdateBook(id, &b); err != nil {
+				respondError(w, http.StatusNotFound, errors.New("book not found"))
+				return
+			}
+			b.ID = id
+			respondJSON(w, http.StatusOK, b)
+			return
+		case http.MethodDelete:
+			if err := h.Service.DeleteBook(id); err != nil {
+				respondError(w, http.StatusNotFound, errors.New("book not found"))
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]string{"message": "deleted"})
+			return
+		default:
+			respondError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+	}
+
+	// 3) /api/books （一覧・作成）
 	switch r.Method {
 	case http.MethodGet:
 		books, _ := h.Service.GetAllBooks()
+		if books == nil {
+			books = []*Book{}
+		}
 		respondJSON(w, http.StatusOK, books)
 	case http.MethodPost:
 		var b Book
@@ -333,18 +377,23 @@ func (h *BookHandler) HandleBooks(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := h.Service.CreateBook(&b); err != nil { // ← エラー見る
+		if err := h.Service.CreateBook(&b); err != nil {
 			respondError(w, http.StatusInternalServerError, err)
 			return
 		}
 		respondJSON(w, http.StatusCreated, b)
+	default:
+		respondError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	}
 }
 
 func (h *BookHandler) HandleBookByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	id := strings.TrimPrefix(r.URL.Path, "/api/books/")
-	id = strings.Split(id, "/")[0]
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	id := ""
+	if len(parts) >= 3 {
+		id = parts[2]
+	}
 
 	switch r.Method {
 	case http.MethodGet:
